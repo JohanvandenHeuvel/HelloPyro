@@ -29,21 +29,26 @@ def plot_image(image):
     plt.show()
 
 
-def load_data(batch_size):
+def load_data(batch_size, use_cuda=False):
     """
     Simple function to load data. Not very useful in its current state expect that it is modular
     and can be easily be re-used or expanded upon.
     :param batch_size:
     :return:
     """
+
+    pin_memory = use_cuda
+
     transform = T.ToTensor()
+    # TODO use pin or something to send data to cuda
     train = datasets.MNIST('train', train=True, download=True, transform=transform)
     test = datasets.MNIST('test', train=False, download=True, transform=transform)
 
     loader = lambda dataset, shuffle: torch.utils.data.DataLoader(dataset,
                                                                   batch_size=batch_size,
                                                                   shuffle=shuffle,
-                                                                  num_workers=1)
+                                                                  num_workers=1,
+                                                                  pin_memory=pin_memory)
 
     train_loader = loader(train, shuffle=True)
     test_loader = loader(test, shuffle=False)
@@ -95,11 +100,13 @@ class Encoder(nn.Module):
 
 class VAE(nn.Module):
 
-    def __init__(self, z_dim=50, hidden_dim=400):
+    def __init__(self, z_dim=50, hidden_dim=400, use_cuda=False):
         super().__init__()
         self.encoder = Encoder(z_dim, hidden_dim)
         self.decoder = Decoder(z_dim, hidden_dim)
-
+        if use_cuda:
+            self.cuda()
+        self.use_cuda = use_cuda
         self.z_dim = z_dim
 
     def model(self, x):
@@ -107,6 +114,7 @@ class VAE(nn.Module):
 
         with pyro.plate("data", x.shape[0]):
             z_loc = x.new_zeros(torch.Size((x.shape[0], self.z_dim)))
+            # z_loc = torch.zeros(x.shape[0], self.z_dim, dtype=x.dtype, device=x.device)
             z_scale = x.new_ones(torch.Size((x.shape[0], self.z_dim)))
 
             z = pyro.sample("latent", dist.Normal(z_loc, z_scale).to_event(1))
@@ -135,10 +143,12 @@ class VAE(nn.Module):
         return loc_img
 
 
-def train(svi, train_loader):
+def train(svi, train_loader, use_cuda=False):
     epoch_loss = 0.
 
     for x, _ in train_loader:
+        if use_cuda:
+            x.cuda()
         epoch_loss += svi.step(x)
 
     normalizer_train = len(train_loader.dataset)
@@ -146,10 +156,12 @@ def train(svi, train_loader):
     return total_epoch_loss_train
 
 
-def evaluate(svi, test_loader):
+def evaluate(svi, test_loader, use_cuda=False):
     test_loss = 0.
 
     for x, _ in test_loader:
+        if use_cuda:
+            x.cuda()
         test_loss += svi.evaluate_loss(x)
 
     normalizer_test = len(test_loader.dataset)
@@ -159,10 +171,12 @@ def evaluate(svi, test_loader):
 
 def main(args):
 
-    batch_size = args['batch_size']
-    train_loader, test_loader = load_data(batch_size)
+    use_cuda = torch.cuda.is_available()
 
-    vae = VAE()
+    batch_size = args['batch_size']
+    train_loader, test_loader = load_data(batch_size, use_cuda=use_cuda)
+
+    vae = VAE(use_cuda=use_cuda)
     optimized = Adam({"lr": 1.0e-3})
     svi = SVI(vae.model, vae.guide, optimized, loss=Trace_ELBO())
 
@@ -175,12 +189,12 @@ def main(args):
     test_elbo = []
 
     for epoch in range(NUM_EPOCHS):
-        total_epoch_loss_train = train(svi, train_loader)
+        total_epoch_loss_train = train(svi, train_loader, use_cuda=use_cuda)
         train_elbo.append(-total_epoch_loss_train)
         print("[epoch {:03d}] average training loss: {:04f}".format(epoch, total_epoch_loss_train))
 
         if epoch % TEST_FREQUENCY == 0:
-            total_epoch_loss_test = evaluate(svi, test_loader)
+            total_epoch_loss_test = evaluate(svi, test_loader, use_cuda=use_cuda)
             test_elbo.append(-total_epoch_loss_test)
             print("[epoch {:03d}] average training loss: {:04f}".format(epoch, total_epoch_loss_test))
 
